@@ -1,0 +1,247 @@
+version: "1.0"
+updated: "2026-06-22"
+
+# ── 이벤트 정의 ─────────────────────────────────────────────────────────────
+events:
+  oil_rise:
+    name: 유가 상승
+    thresholds: {daily_pct: 3.0, five_day_pct: 8.0}
+    assets: ["CL=F", "BZ=F"]
+    category: market
+
+  oil_fall:
+    name: 유가 하락
+    thresholds: {daily_pct: -3.0, five_day_pct: -8.0}
+    assets: ["CL=F", "BZ=F"]
+    category: market
+
+  krw_weak:
+    name: 원화 약세
+    thresholds: {daily_pct: 0.7, level: 1400}
+    assets: ["KRW=X"]
+    category: market
+
+  krw_strong:
+    name: 원화 강세
+    thresholds: {daily_pct: -0.7, level: 1300}
+    assets: ["KRW=X"]
+    category: market
+
+  rate_rise:
+    name: 금리 상승
+    thresholds: {daily_bp: 5}
+    assets: ["^TNX"]
+    keywords: ["금리인상", "기준금리 인상", "금통위 인상", "hawkish"]
+    category: market
+
+  rate_fall:
+    name: 금리 하락
+    thresholds: {daily_bp: -5}
+    assets: ["^TNX"]
+    keywords: ["금리인하", "피벗", "완화", "dovish"]
+    category: market
+
+  geopolitical:
+    name: 지정학 리스크
+    thresholds: {vix_level: 25, vix_change_pct: 15}
+    assets: ["^VIX", "GC=F"]
+    keywords: ["전쟁", "분쟁", "미사일", "도발", "지정학", "긴장", "충돌", "침공"]
+    category: risk
+
+  inflation_high:
+    name: 인플레이션 상승
+    thresholds: {}
+    assets: []
+    keywords: ["CPI 상회", "물가 급등", "인플레", "PPI 상승", "물가상승"]
+    category: macro
+
+  policy_defense:
+    name: 방산 정책
+    thresholds: {}
+    assets: []
+    keywords: ["방산", "방위산업", "K-방산", "무기수출", "국방예산", "방산수출"]
+    category: policy
+
+  policy_nuclear:
+    name: 원전 정책
+    thresholds: {}
+    assets: []
+    keywords: ["원전", "원자력", "SMR", "핵발전", "소형원자로", "원전건설"]
+    category: policy
+
+  policy_value_up:
+    name: 밸류업 정책
+    thresholds: {}
+    assets: []
+    keywords: ["밸류업", "주주환원", "저PBR", "기업가치제고", "배당확대"]
+    category: policy
+
+  policy_semiconductor:
+    name: 반도체 지원 정책
+    thresholds: {}
+    assets: []
+    keywords: ["반도체지원", "반도체특별법", "K-반도체", "소부장", "반도체클러스터"]
+    category: policy
+
+  policy_beauty:
+    name: K-뷰티 수요 회복
+    thresholds: {}
+    assets: []
+    keywords: ["K-뷰티", "화장품수출", "중국관광", "따이공", "면세회복"]
+    category: policy
+
+# ── 섹터 정의 ─────────────────────────────────────────────────────────────────
+sectors:
+  energy:
+    name: 에너지/정유
+    representative_stocks:
+      - {code: "010950", name: "S-Oil"}
+      - {code: "096770", name: "SK이노베이션"}
+      - {code: "078930", name: "GS"}
+      - {code: "267250", name: "HD현대"}
+
+  defense:
+    name: 방위산업
+    representative_stocks:
+      - {code: "012450", name: "한화에어로스페이스"}
+      - {code: "079550", name: "LIG넥스원"}
+      - {code: "064350", name: "현대로템"}
+      - {code: "047810", name: "한국항공우주"}
+      - {code: "272210", name: "한화시스템"}
+
+  shipbuilding:
+    name: 조선
+    representative_stocks:
+      - {code: "329180", name: "HD현대중공업"}
+      - {code: "009540", name: "HD한국조선해양"}
+      - {code: "042660", name: "한화오션"}
+
+  airline:
+    name: 항공/여행
+    representative_stocks:
+      - {code: "003490", name: "대한항공"}
+      - {code: "020560", name: "아시아나항공"}
+      - {code: "035250", name: "강원랜드"}
+
+  chemicals:
+    name: 화학/소재
+    representative_stocks:
+      - {code: "011170", name: "롯데케미칼"}
+      - {code: "051910", name: "LG화학"}
+      - {code: "006400", name: "삼성SDI"}
+
+  finance:
+    name: 금융/은행/보험
+    representative_stocks:
+      - {code: "105560", name: "KB금융"}
+      - {code: "055550", name: "신한지주"}
+      - {code: "086790", name: "하나금융지주"}
+      - {code: "032830", name: "삼성생명"}
+      - {code: "000810", name: "삼성화재"}
+
+  growth:
+    name: 성장주/인터넷/바이오
+    representative_stocks:
+      - {code: "035420", name: "NAVER"}
+      - {code: "035720", name: "카카오"}
+      - {code: "207940", name: "삼성바이오로직스"}
+      - {code: "068270", name: "셀트리온"}
+
+  semiconductor:
+    name: 반도체
+    representative_stocks:
+      - {code: "005930", name: "삼성전자"}
+      - {code: "000660", name: "SK하이닉스"}
+      - {code: "000990", name: "DB하이텍"}
+      - {code: "042700", name: "한미반도체"}
+
+  auto:
+    name: 자동차
+    representative_stocks:
+      - {code: "005380", name: "현대차"}
+      - {code: "000270", name: "기아"}
+      - {code: "012330", name: "현대모비스"}
+
+  construction:
+    name: 건설/부동산
+    representative_stocks:
+      - {code: "000720", name: "현대건설"}
+      - {code: "028260", name: "삼성물산"}
+      - {code: "047040", name: "대우건설"}
+
+  nuclear:
+    name: 원전/발전
+    representative_stocks:
+      - {code: "034020", name: "두산에너빌리티"}
+      - {code: "298040", name: "효성중공업"}
+
+  beauty:
+    name: 화장품/K-뷰티
+    representative_stocks:
+      - {code: "090430", name: "아모레퍼시픽"}
+      - {code: "192820", name: "코스맥스"}
+      - {code: "161890", name: "한국콜마"}
+      - {code: "002790", name: "아모레G"}
+
+  gold_materials:
+    name: 귀금속/소재
+    representative_stocks:
+      - {code: "005490", name: "POSCO홀딩스"}
+      - {code: "004020", name: "현대제철"}
+
+# ── 이벤트 → 섹터 매핑 ────────────────────────────────────────────────────────
+# weight > 0: 수혜, weight < 0: 피해, |weight| = 영향 강도 (0~1)
+mappings:
+  # 유가 상승
+  - {event: oil_rise,      sector: energy,        weight:  0.90, rationale: "정유사 마진 확대"}
+  - {event: oil_rise,      sector: shipbuilding,  weight:  0.40, rationale: "에너지 설비 발주 증가"}
+  - {event: oil_rise,      sector: airline,       weight: -0.80, rationale: "항공유 비용 급등"}
+  - {event: oil_rise,      sector: chemicals,     weight: -0.50, rationale: "원료비 상승"}
+
+  # 유가 하락
+  - {event: oil_fall,      sector: airline,       weight:  0.80, rationale: "항공유 비용 감소"}
+  - {event: oil_fall,      sector: chemicals,     weight:  0.60, rationale: "원료비 하락 → 마진 개선"}
+  - {event: oil_fall,      sector: energy,        weight: -0.90, rationale: "정유사 마진 감소"}
+
+  # 원화 약세
+  - {event: krw_weak,      sector: semiconductor, weight:  0.80, rationale: "달러 수출 이익 증가"}
+  - {event: krw_weak,      sector: auto,          weight:  0.70, rationale: "수출 경쟁력 강화"}
+  - {event: krw_weak,      sector: airline,       weight: -0.60, rationale: "달러 비용 증가"}
+  - {event: krw_weak,      sector: growth,        weight: -0.30, rationale: "외국인 이탈"}
+
+  # 원화 강세
+  - {event: krw_strong,    sector: airline,       weight:  0.50, rationale: "달러 비용 감소"}
+  - {event: krw_strong,    sector: semiconductor, weight: -0.60, rationale: "수출 마진 축소"}
+  - {event: krw_strong,    sector: auto,          weight: -0.50, rationale: "수출 경쟁력 약화"}
+
+  # 금리 상승
+  - {event: rate_rise,     sector: finance,       weight:  0.80, rationale: "NIM 확대"}
+  - {event: rate_rise,     sector: growth,        weight: -0.80, rationale: "할인율 상승 → PER 압축"}
+  - {event: rate_rise,     sector: construction,  weight: -0.70, rationale: "금융비용 증가"}
+  - {event: rate_rise,     sector: beauty,        weight: -0.30, rationale: "소비 위축"}
+
+  # 금리 하락
+  - {event: rate_fall,     sector: growth,        weight:  0.80, rationale: "할인율 하락 → 성장주 재평가"}
+  - {event: rate_fall,     sector: construction,  weight:  0.70, rationale: "부동산 회복"}
+  - {event: rate_fall,     sector: beauty,        weight:  0.30, rationale: "소비 회복"}
+  - {event: rate_fall,     sector: finance,       weight: -0.50, rationale: "NIM 축소"}
+
+  # 지정학 리스크
+  - {event: geopolitical,  sector: defense,       weight:  0.95, rationale: "방산 수요 직접 수혜"}
+  - {event: geopolitical,  sector: gold_materials,weight:  0.60, rationale: "안전자산 선호"}
+  - {event: geopolitical,  sector: airline,       weight: -0.70, rationale: "여행 수요 급감"}
+  - {event: geopolitical,  sector: growth,        weight: -0.50, rationale: "리스크 오프"}
+
+  # 인플레이션 상승
+  - {event: inflation_high,sector: energy,        weight:  0.60, rationale: "에너지 가격 상승"}
+  - {event: inflation_high,sector: gold_materials,weight:  0.50, rationale: "실물자산 선호"}
+  - {event: inflation_high,sector: growth,        weight: -0.60, rationale: "금리 인상 압력"}
+  - {event: inflation_high,sector: construction,  weight: -0.40, rationale: "원자재 비용 상승"}
+
+  # 정책
+  - {event: policy_defense,      sector: defense,       weight:  0.90, rationale: "방산 정책 직접 수혜"}
+  - {event: policy_nuclear,      sector: nuclear,       weight:  0.90, rationale: "원전 정책 직접 수혜"}
+  - {event: policy_value_up,     sector: finance,       weight:  0.70, rationale: "저PBR 금융주 부각"}
+  - {event: policy_value_up,     sector: auto,          weight:  0.60, rationale: "현대차/기아 주주환원"}
+  - {event: policy_semiconductor,sector: semiconductor,  weight:  0.80, rationale: "정부 지원 직접 수혜"}
+  - {event: policy_beauty,       sector: beauty,        weight:  0.90, rationale: "K-뷰티 수요 회복"}

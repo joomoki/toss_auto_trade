@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 모델 가중치 · 활성화 · 앙상블 임계값 설정
+# 런타임 반영: 백엔드 재시작 없이 이 파일을 수정하면 다음 사이클에 즉시 적용된다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 앙상블 임계값 ──────────────────────────────────────────────
+# composite_score(0~1)가 이 값을 넘으면 BUY, 이하면 SELL, 사이는 HOLD.
+# 낮출수록 매매 빈도 증가 / 높일수록 감소.
+ensemble:
+  buy_threshold:  0.57    # M10 레이블용 (참고치) — 엔진 실제 게이트는 composite_score >= 0.57
+  sell_threshold: 0.45    # 기본값 (이전 0.37 → 완화)
+
+# ── 개별 모델 설정 ─────────────────────────────────────────────
+# weight: 앙상블 가중합에서 해당 모델의 기여 비중
+# enabled: false 이면 run_all_models()에서 건너뜀 (코드 삭제 없이 비활성화)
+models:
+  M1:
+    name: "이동평균 골든/데드 크로스"
+    weight: 1.2      # 상향 (추세 방향, 클러스터A와 상보적)
+    enabled: true
+    info: "EMA5/EMA20 크로스오버 (추세 방향)"
+
+  M2:
+    name: "RSI 과매도 반등"
+    weight: 1.0
+    enabled: false   # Phase 2 비활성화 — M4(BB)와 상관 0.78, 클러스터A 중복
+    info: "RSI14 과매도/과매수 오실레이터"
+
+  M3:
+    name: "MACD 모멘텀"
+    weight: 1.0
+    enabled: false   # Phase 2 비활성화 — M1(EMA)과 상관 0.36, M1로 대체
+    info: "MACD 골든/데드 크로스 (모멘텀)"
+
+  M4:
+    name: "볼린저밴드 반등"
+    weight: 1.2      # 상향 (클러스터A 대표, M2/M6/M7 흡수)
+    enabled: true
+    info: "BB %B 하단 반등 / 상단 과열"
+
+  M5:
+    name: "거래량 폭발"
+    weight: 1.0      # 상향 (독립 신호, 0.8 → 1.0)
+    enabled: true
+    info: "거래량 20일 평균 대비 급증"
+
+  M6:
+    name: "CCI 과매도"
+    weight: 0.8
+    enabled: false   # Phase 2 비활성화 — M4(BB)와 상관 0.93, 거의 동일 신호
+    info: "CCI20 과매도/과매수 오실레이터"
+
+  M7:
+    name: "VWAP 이탈 회귀"
+    weight: 0.9
+    enabled: false   # Phase 2 비활성화 — M4(BB)와 상관 0.84, 클러스터A 중복
+    info: "VWAP 대비 이격 회귀"
+
+  M8:
+    name: "스토캐스틱"
+    weight: 0.9
+    enabled: true    # 재활성화 — BB(M4)와 독립성 있는 모멘텀 신호, 신호 다양성 추가
+    info: "스토캐스틱 K/D 크로스오버"
+
+  M9:
+    name: "LightGBM 스윙"
+    weight: 1.6      # 상향 (ML 종합, 비선형 피처 조합)
+    enabled: true
+    info: "ML 앙상블 (가장 높은 가중치)"
+
+# ── composite_score 가중치 ─────────────────────────────────────
+# auto_trade_engine.py 에서 사용. 합계 = 1.0 이어야 한다.
+composite:
+  model:   0.45   # M10 앙상블 점수  (KRX 수급 미작동 기간 임시 상향 — supply 대체)
+  news:    0.10   # 뉴스 감성 점수   (API 미설정 기간 하향)
+  dart:    0.10   # DART 공시 점수
+  market:  0.20   # 시장 상황 점수   (코스피 실시간 반영, 상향)
+  supply:  0.15   # 외국인/기관 수급  (KRX 미설정 기간 임시 하향)
