@@ -104,8 +104,8 @@ class SignalEngine:
                     allowed, reason = self.risk_mgr.check_buy_conditions(
                         stock_code, confidence, holdings, available_cash, budget
                     )
-                    if allowed:
-                        qty = self.risk_mgr.calculate_order_quantity(current_price, budget)
+                    qty = self.risk_mgr.calculate_order_quantity(current_price, budget) if allowed else 0
+                    if qty > 0:
                         trade = await executor.execute(signal, qty, current_price)
                         if trade and self.ws_broadcast:
                             await self.ws_broadcast({"type": "signal", "data": {

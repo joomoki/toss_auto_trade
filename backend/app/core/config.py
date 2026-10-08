@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     signal_interval_minutes: int = Field(10, env="SIGNAL_INTERVAL_MINUTES")
     max_holdings: int = Field(10, env="MAX_HOLDINGS")
     max_stock_price: int = Field(0, env="MAX_STOCK_PRICE")  # 종목 단가 상한 (원, 0=제한없음)
+    market_extra_holidays: str = Field("", env="MARKET_EXTRA_HOLIDAYS")  # KRX 달력에 없는 임시 휴장일 (YYYY-MM-DD,콤마 구분)
 
     # ML model
     model_path: str = Field("./app/ml/models/lgbm_v1.pkl", env="MODEL_PATH")

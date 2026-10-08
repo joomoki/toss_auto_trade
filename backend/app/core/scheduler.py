@@ -11,7 +11,8 @@ def is_market_open() -> bool:
     import pytz
     seoul_tz = pytz.timezone("Asia/Seoul")
     now = datetime.now(seoul_tz)
-    if now.weekday() >= 5:
+    from app.core.market_calendar import is_trading_day
+    if not is_trading_day(now.date()):
         return False
     market_open = dtime(9, 0)
     market_close = dtime(15, 30)
@@ -34,8 +35,9 @@ def setup_scheduler(signal_engine_func, interval_minutes: int = 10):
         from datetime import datetime, time as _t
         import pytz
         _now = datetime.now(pytz.timezone("Asia/Seoul"))
-        # 주말 및 정규장 시간(09:00~15:30) 외에는 스킵
-        if _now.weekday() >= 5 or not (_t(9, 0) <= _now.time() <= _t(15, 30)):
+        # 주말·KRX 휴장일 및 정규장 시간(09:00~15:30) 외에는 스킵
+        from app.core.market_calendar import is_trading_day
+        if not is_trading_day(_now.date()) or not (_t(9, 0) <= _now.time() <= _t(15, 30)):
             return
         from app.core.database import AsyncSessionLocal
         from app.services.auto_trade_engine import AutoTradeEngine
@@ -293,7 +295,8 @@ def setup_scheduler(signal_engine_func, interval_minutes: int = 10):
         import pytz
         _log = logging.getLogger("long_term_buy")
         _now = datetime.now(pytz.timezone("Asia/Seoul"))
-        if _now.weekday() >= 5 or not (_t(9, 0) <= _now.time() <= _t(15, 0)):
+        from app.core.market_calendar import is_trading_day
+        if not is_trading_day(_now.date()) or not (_t(9, 0) <= _now.time() <= _t(15, 0)):
             return
         from app.core.database import AsyncSessionLocal
         from app.services.auto_trade_engine import AutoTradeEngine
@@ -328,58 +331,17 @@ def setup_scheduler(signal_engine_func, interval_minutes: int = 10):
         try:
             from app.core.database import AsyncSessionLocal
             from app.services.toss_api import TossApiClient
-            from app.models.holding import Holding
-            from sqlalchemy import select
-            api = TossApiClient.get_instance()
-            balance = await api.get_balance()
-            kt4_map = {p["stock_code"]: p for p in balance.get("stockHoldings", [])}
-            if not kt4_map:
-                return
-            async with AsyncSessionLocal() as db:
-                for code, kt4 in kt4_map.items():
-                    r = await db.execute(select(Holding).where(Holding.stock_code == code))
-                    h_obj = r.scalar_one_or_none()
-                    if h_obj:
-                        if kt4.get("current_price"):
-                            h_obj.current_price = kt4["current_price"]
-                        if kt4.get("pnl") is not None:
-                            h_obj.unrealized_pnl = kt4["pnl"]
-                        if kt4.get("pnl_pct") is not None:
-                            h_obj.unrealized_pnl_pct = kt4["pnl_pct"]
-                        if kt4.get("avg_price"):
-                            h_obj.avg_buy_price = kt4["avg_price"]
-
-                # Kiwoom 실잔고에 없는 DB holding → 수동 매도 감지 → P&L 계산 후 삭제
-                from app.services.telegram_notifier import is_configured as _tg_ok, send_message as _tg_send
-                _all_h = await db.execute(select(Holding))
-                for _h in _all_h.scalars().all():
-                    if _h.stock_code not in kt4_map:
-                        _avg  = float(_h.avg_buy_price or 0)
-                        _cur  = float(_h.current_price or _avg)
-                        _qty  = int(_h.quantity or 0)
-                        _pnl  = (_cur - _avg) * _qty
-                        _ppct = (_cur - _avg) / (_avg + 1e-9) * 100
-                        _sign = "📈" if _pnl >= 0 else "📉"
-                        log.warning(
-                            f"[잔고동기화] 수동매도 감지: {_h.stock_name}({_h.stock_code})"
-                            f" {_qty}주 | 추정손익 {_pnl:+,.0f}원 ({_ppct:+.2f}%) → DB 삭제"
-                        )
-                        if _tg_ok():
-                            await _tg_send(
-                                f"{_sign} 수동 매도 완료 감지\n"
-                                f"종목: {_h.stock_name} ({_h.stock_code})\n"
-                                f"수량: {_qty:,}주\n"
-                                f"평균단가: {_avg:,.0f}원\n"
-                                f"추정 매도가: {_cur:,.0f}원\n"
-                                f"──────────────\n"
-                                f"추정 손익: {_pnl:+,.0f}원 ({_ppct:+.2f}%)\n"
-                                f"※ 마지막 갱신 현재가 기준 추정값",
-                                msg_type="sell",
-                                force=True,
-                            )
-                        await db.delete(_h)
-
-                await db.commit()
+            from app.services.holding_sync import TRADE_CYCLE_LOCK, sync_holdings_with_balance
+            if TRADE_CYCLE_LOCK.locked():
+                return   # 자동매매 사이클이 사이클 시작 시 직접 동기화함
+            async with TRADE_CYCLE_LOCK:
+                api = TossApiClient.get_instance()
+                balance = await api.get_balance()
+                kt4_map = {p["stock_code"]: p for p in balance.get("stockHoldings", [])}
+                if not kt4_map:
+                    return
+                async with AsyncSessionLocal() as db:
+                    await sync_holdings_with_balance(db, kt4_map)
             log.debug(f"[잔고동기화] holdings 현재가 갱신 ({len(kt4_map)}종목)")
         except Exception as e:
             log.warning(f"[잔고동기화] 오류: {e}")

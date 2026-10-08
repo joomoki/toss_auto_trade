@@ -444,11 +444,13 @@ class KiwoomApiClient:
     ) -> dict:
         """
         매수(kt10000) / 매도(kt10001) 주문
-        trde_tp: "00" = 지정가, "03" = 시장가
-        dmst_stex_tp: "KRX" = 코스피, "NXT" = 코스닥
+        trde_tp: "0" = 보통(지정가), "3" = 시장가
+        dmst_stex_tp: "KRX" = 한국거래소 (코스피·코스닥 모두), "NXT" = 넥스트레이드(대체거래소)
+          → 코스닥도 KRX 로 주문해야 한다. NXT 로 보내면 넥스트레이드 비대상 종목은 거절(507615)된다.
+        market 인자는 호출부 호환용으로만 유지.
         """
         api_id = "kt10000" if order_type == "BUY" else "kt10001"
-        dmst_stex_tp = "NXT" if market == "KOSDAQ" else "KRX"
+        dmst_stex_tp = "KRX"
         trde_tp = "3" if use_market_order else "0"
         ord_uv  = "" if use_market_order else str(price)
         body: dict = {
