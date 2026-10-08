@@ -64,6 +64,14 @@ async def lifespan(_app: FastAPI):
             "ADD COLUMN IF NOT EXISTS is_long_term BOOLEAN DEFAULT FALSE"
         ))
         await conn.execute(text(
+            "ALTER TABLE toss_stock.holdings "
+            "ADD COLUMN IF NOT EXISTS peak_pnl_pct NUMERIC(8,4)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE toss_stock.holdings "
+            "ADD COLUMN IF NOT EXISTS smart_hold_loss_cycles INTEGER DEFAULT 0"
+        ))
+        await conn.execute(text(
             "ALTER TABLE toss_stock.auto_trade_logs "
             "ADD COLUMN IF NOT EXISTS commission NUMERIC(10,2)"
         ))

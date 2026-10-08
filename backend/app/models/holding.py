@@ -18,6 +18,8 @@ class Holding(Base):
     unrealized_pnl_pct = Column(Numeric(8, 4),                                               comment="평가 손익률 (%)")
     is_manual       = Column(Boolean,                  default=False,                                 comment="수동 매수 예약으로 체결된 종목 여부")
     is_long_term    = Column(Boolean,                  default=False,                                 comment="장기 보유 전략 종목 여부 (LongTermStrategy)")
+    peak_pnl_pct    = Column(Numeric(8, 4),                                                    comment="보유 중 최고 수익률 (%, 트레일링 스탑 기준)")
+    smart_hold_loss_cycles = Column(Integer,           default=0,                                     comment="스마트홀딩 중 -1.5% 이하 연속 사이클 수")
     updated_at      = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), comment="마지막 갱신일시")
 
 

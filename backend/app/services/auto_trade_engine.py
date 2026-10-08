@@ -27,10 +27,10 @@ def _today_kst() -> date:
 def _mode_status_bar(current_mode: str, kospi_chg: float) -> str:
     """텔레그램 알림용 경계 단계 현황 텍스트 생성."""
     _STEPS = [
-        ("NORMAL",       "🟢", "정상",    "코스피 ≥ -1.5%"),
-        ("CAUTIOUS",     "🟡", "경계",    "코스피 -1.5%~-2%"),
-        ("CONSERVATIVE", "🔴", "수비",    "코스피 -2%~-3%"),
-        ("DEFENSIVE",    "⛔", "전면수비", "코스피 ≤ -3%"),
+        ("NORMAL",       "🟢", "정상",    "코스피 ≥ -0.8%"),
+        ("CAUTIOUS",     "🟡", "경계",    "코스피 -0.8%~-1.5%"),
+        ("CONSERVATIVE", "🔴", "수비",    "코스피 -1.5%~-2.5%"),
+        ("DEFENSIVE",    "⛔", "전면수비", "코스피 < -2.5%"),
     ]
     _sev = {m: i for i, (m, *_) in enumerate(_STEPS)}
     cur_sev = _sev.get(current_mode, 0)
@@ -57,6 +57,8 @@ from app.models.holding import Holding
 from app.models.strategy import Strategy
 from app.services.toss_api import TossApiClient
 from app.services.risk_manager import RiskManager
+from app.services.holding_sync import TRADE_CYCLE_LOCK, sync_holdings_with_balance
+from app.core.market_calendar import business_days_ago
 from app.services import telegram_notifier as tg
 from app.ml.feature_engineering import compute
 from app.ml.multi_models import run_all_models
@@ -98,8 +100,8 @@ class AutoTradeEngine:
 
     # 인스턴스 간 공유 — 매 사이클마다 새 인스턴스가 생성되므로 클래스 변수로 유지
     _last_trade_mode: Optional[str] = None
-    _smart_hold_loss_cycles: dict = {}   # code → 연속 손실 사이클 수 (스마트홀딩 중 -1.5% 이하)
-    _peak_pct: dict = {}                 # code → 보유 중 최고 수익률 (트레일링 스탑용)
+    # 트레일링 스탑 고점 / 스마트홀딩 연속 손실 사이클은 재시작 후에도 유지되도록
+    # holdings.peak_pnl_pct / holdings.smart_hold_loss_cycles 컬럼에 저장
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -107,6 +109,8 @@ class AutoTradeEngine:
         self.risk_mgr = RiskManager()
         self._market_ctx: dict = {}
         self.ws_broadcast = None
+        # False 이면 (장 외 force 실행) 매도 주문 없이 평가만
+        self._orders_allowed: bool = True
 
     # ────────────────────────────────────────────────────────
     # 메인 진입점 (APScheduler에서 호출)
@@ -117,7 +121,12 @@ class AutoTradeEngine:
         자동매매 사이클 실행.
         collect_result=True 이면 상세 실행 결과 dict 반환 (즉시실행 API용).
         force=True 이면 장 외 시간에도 종목 평가까지 실행 (실제 주문은 제외).
+        스케줄 사이클·즉시실행·잔고동기화가 겹쳐 이중 주문이 나지 않도록 락으로 직렬화.
         """
+        async with TRADE_CYCLE_LOCK:
+            return await self._run(collect_result=collect_result, force=force)
+
+    async def _run(self, collect_result: bool = False, force: bool = False) -> dict | None:
         import time as _time
         started_at = _time.monotonic()
 
@@ -125,12 +134,13 @@ class AutoTradeEngine:
             return round(_time.monotonic() - started_at, 2)
 
         market_open = self.risk_mgr.is_market_open()
+        self._orders_allowed = market_open
         if not market_open and not force:
             logger.info("[자동매매] 장 운영 시간 외 — 스킵")
             if collect_result:
                 return {
                     "status": "skipped",
-                    "skip_reason": "장 운영 시간 외 (평일 09:00~15:30)",
+                    "skip_reason": "장 운영 시간 외 (KRX 거래일 09:00~15:25)",
                     "market_open": False,
                     "elapsed": _elapsed(),
                 }
@@ -148,38 +158,29 @@ class AutoTradeEngine:
                 }
             return None
 
+        # 킬스위치 / 일일 손실 한도 → 신규 매수만 중단, 손절·익절 감시는 계속 실행
+        buy_block_reason: Optional[str] = None
         if strategy.kill_switch_active:
-            logger.warning("[자동매매] ⛔ 킬스위치 ON — 우측 상단 자동매매 활성화 토글을 켜세요")
-            if collect_result:
-                return {
-                    "status": "skipped",
-                    "skip_reason": "킬스위치 ON — 자동매매 활성화 토글을 켜세요",
-                    "market_open": True,
-                    "elapsed": _elapsed(),
-                }
-            return None
-
-        max_loss_pct = float(getattr(strategy, "max_daily_loss_pct", None) or 5.0)
-        if max_loss_pct > 0:
-            daily_loss = await self._get_daily_realized_pnl()
-            budget_ref = float(strategy.max_position_amt or 1_000_000) * settings.max_holdings
-            loss_threshold = -budget_ref * (max_loss_pct / 100)
-            if daily_loss < loss_threshold:
-                logger.error(
-                    f"[킬스위치 발동] 오늘 손실 {daily_loss:,.0f}원 > 한도 {loss_threshold:,.0f}원 "
-                    f"→ 자동매매 중단"
-                )
-                strategy.kill_switch_active = True
-                await self.db.commit()
-                await tg.notify_kill_switch(daily_loss, loss_threshold)
-                if collect_result:
-                    return {
-                        "status": "skipped",
-                        "skip_reason": f"일일 손실 한도 초과 ({daily_loss:,.0f}원 > {loss_threshold:,.0f}원)",
-                        "market_open": True,
-                        "elapsed": _elapsed(),
-                    }
-                return None
+            logger.warning("[자동매매] ⛔ 킬스위치 ON — 신규 매수 중단, 손절/익절 감시만 실행")
+            buy_block_reason = "킬스위치 ON — 신규 매수 중단 (손절/익절은 계속 실행)"
+        else:
+            _loss_pct_raw = getattr(strategy, "max_daily_loss_pct", None)
+            max_loss_pct = float(_loss_pct_raw) if _loss_pct_raw is not None else 5.0   # 0 = 한도 비활성
+            if max_loss_pct > 0:
+                daily_loss = await self._get_daily_realized_pnl()
+                budget_ref = float(strategy.max_position_amt or 1_000_000) * settings.max_holdings
+                loss_threshold = -budget_ref * (max_loss_pct / 100)
+                if daily_loss < loss_threshold:
+                    logger.error(
+                        f"[킬스위치 발동] 오늘 손실 {daily_loss:,.0f}원 > 한도 {loss_threshold:,.0f}원 "
+                        f"→ 신규 매수 중단 (손절/익절 감시는 계속)"
+                    )
+                    strategy.kill_switch_active = True
+                    await self.db.commit()
+                    await tg.notify_kill_switch(daily_loss, loss_threshold)
+                    buy_block_reason = (
+                        f"일일 손실 한도 초과 ({daily_loss:,.0f}원 > {loss_threshold:,.0f}원) — 신규 매수 중단"
+                    )
 
         _clog.start_cycle()
         _clog.log("info", "start", f"사이클 시작 | 전략={strategy.name} | 모드={'실전' if settings.auto_trade_enabled else '모의'}")
@@ -189,8 +190,11 @@ class AutoTradeEngine:
 
         # 계좌 잔고
         balance = {}
+        balance_ok = False
         try:
             balance = await self.api.get_balance()
+            from app.services.kiwoom_api import is_account_tr_available
+            balance_ok = is_account_tr_available()   # 원장 비가용 시간대는 스냅샷이므로 동기화 제외
         except Exception as e:
             err_str = str(e)
             logger.error(f"잔고 조회 실패: {err_str}")
@@ -205,82 +209,16 @@ class AutoTradeEngine:
         available_cash = float(balance.get("availableCash") or balance.get("cash", 0))
         budget_per_stock = float(strategy.max_position_amt or 1_000_000)
 
-        # ── kt00004 현재가로 DB holdings 동기화 ───────────────────
+        # ── kt00004 실잔고로 DB holdings 동기화 (체결 확정·누락 복구 포함) ──
         kt4_price_map: dict[str, dict] = {
             p["stock_code"]: p for p in balance.get("stockHoldings", [])
         }
-        if kt4_price_map:
+        if balance_ok:
             try:
-                for code, kt4 in kt4_price_map.items():
-                    r = await self.db.execute(
-                        select(Holding).where(Holding.stock_code == code)
-                    )
-                    h_obj = r.scalar_one_or_none()
-                    if h_obj:
-                        if kt4.get("current_price"):
-                            h_obj.current_price = kt4["current_price"]
-                        if kt4.get("pnl") is not None:
-                            h_obj.unrealized_pnl = kt4["pnl"]
-                        if kt4.get("pnl_pct") is not None:
-                            h_obj.unrealized_pnl_pct = kt4["pnl_pct"]
-                        if kt4.get("avg_price"):
-                            h_obj.avg_buy_price = kt4["avg_price"]
-
-                # Kiwoom 실잔고에 있는 종목 중 PENDING BUY 로그 → 자동 FILLED 처리
-                # 체결됐지만 API 응답 지연으로 PENDING이 남아있으면 잔고 동기화 때 정리
-                _pending_buy_r = await self.db.execute(
-                    select(AutoTradeLog).where(
-                        AutoTradeLog.action == "BUY",
-                        AutoTradeLog.status == "PENDING",
-                    )
-                )
-                for _pb in _pending_buy_r.scalars().all():
-                    if _pb.stock_code in kt4_price_map:
-                        _kt4 = kt4_price_map[_pb.stock_code]
-                        _filled_p = float(_kt4.get("avg_price") or _kt4.get("current_price") or _pb.order_price or 0)
-                        _filled_qty = int(_pb.quantity or 0)
-                        _pb.status       = "FILLED"
-                        _pb.filled_price = _filled_p
-                        _pb.filled_amount = _filled_p * _filled_qty if _filled_p and _filled_qty else _pb.order_amount
-                        _pb.filled_at    = datetime.now(timezone.utc)
-                        logger.info(
-                            f"[잔고동기화] PENDING→FILLED 자동처리: {_pb.stock_name}({_pb.stock_code})"
-                            f" {_filled_qty}주 @{_filled_p:,.0f}원"
-                        )
-
-                # Kiwoom 실잔고에 없는 DB holding → 수동 매도 감지 → P&L 계산 후 삭제
-                _all_h_r = await self.db.execute(select(Holding))
-                for _h in _all_h_r.scalars().all():
-                    if _h.stock_code not in kt4_price_map:
-                        _avg  = float(_h.avg_buy_price or 0)
-                        _cur  = float(_h.current_price or _avg)
-                        _qty  = int(_h.quantity or 0)
-                        _pnl  = (_cur - _avg) * _qty
-                        _ppct = (_cur - _avg) / (_avg + 1e-9) * 100
-                        _sign = "📈" if _pnl >= 0 else "📉"
-                        logger.warning(
-                            f"[잔고동기화] 수동매도 감지: {_h.stock_name}({_h.stock_code})"
-                            f" {_qty}주 | 추정손익 {_pnl:+,.0f}원 ({_ppct:+.2f}%) → DB 삭제"
-                        )
-                        if tg.is_configured():
-                            await tg.send_message(
-                                f"{_sign} 수동 매도 완료 감지\n"
-                                f"종목: {_h.stock_name} ({_h.stock_code})\n"
-                                f"수량: {_qty:,}주\n"
-                                f"평균단가: {_avg:,.0f}원\n"
-                                f"추정 매도가: {_cur:,.0f}원\n"
-                                f"──────────────\n"
-                                f"추정 손익: {_pnl:+,.0f}원 ({_ppct:+.2f}%)\n"
-                                f"※ 마지막 갱신 현재가 기준 추정값",
-                                msg_type="sell",
-                                force=True,
-                            )
-                        await self.db.delete(_h)
-
-                await self.db.commit()
-                logger.debug(f"[잔고동기화] DB holdings 현재가 갱신 완료 ({len(kt4_price_map)}종목)")
+                await sync_holdings_with_balance(self.db, kt4_price_map)
             except Exception as _sync_e:
-                logger.warning(f"[잔고동기화] holdings 현재가 갱신 오류: {_sync_e}")
+                await self.db.rollback()
+                logger.warning(f"[잔고동기화] holdings 동기화 오류: {_sync_e}")
 
         # 보유 종목 (DB 갱신 후 재조회)
         holdings_result = await self.db.execute(select(Holding))
@@ -293,6 +231,8 @@ class AutoTradeEngine:
                 "current_price": float(h.current_price or h.avg_buy_price),
                 "is_long_term": bool(h.is_long_term),
                 "is_manual":    bool(h.is_manual),
+                "peak_pnl_pct": float(h.peak_pnl_pct) if h.peak_pnl_pct is not None else None,
+                "smart_hold_loss_cycles": int(h.smart_hold_loss_cycles or 0),
             }
             for h in holdings_result.scalars().all()
         }
@@ -365,6 +305,19 @@ class AutoTradeEngine:
         await self._check_exits(holdings, strategy, blocked_sell_today)
         _clog.log("info", "exit", "손절/익절 체크 완료")
 
+        if buy_block_reason:
+            await self.db.commit()
+            _clog.log("warn", "start", f"신규 매수 생략 — {buy_block_reason}")
+            _clog.end_cycle({"bought": 0, "buy_blocked": buy_block_reason})
+            if collect_result:
+                return {
+                    "status": "skipped",
+                    "skip_reason": buy_block_reason,
+                    "market_open": market_open,
+                    "elapsed": _elapsed(),
+                }
+            return None
+
         # ── 1-b. 수동 매수 예약 실행 ──────────────────────
         available_cash = await self._execute_manual_buys(
             available_cash, holdings, market_open, strategy
@@ -382,6 +335,8 @@ class AutoTradeEngine:
                 "current_price": float(h.current_price or h.avg_buy_price),
                 "is_long_term": bool(h.is_long_term),
                 "is_manual":    bool(h.is_manual),
+                "peak_pnl_pct": float(h.peak_pnl_pct) if h.peak_pnl_pct is not None else None,
+                "smart_hold_loss_cycles": int(h.smart_hold_loss_cycles or 0),
             }
             for h in holdings_r2.scalars().all()
         }
@@ -474,12 +429,11 @@ class AutoTradeEngine:
 
         # ── 프리장 거래량 급증 종목 우선순위 부스트 ──────────────
         try:
-            from datetime import date as _date
             from app.models.premarket_scan import PremarketScanLog as _PML
             _pm_r = await self.db.execute(
                 select(_PML.stock_code, _PML.vol_ratio, _PML.signal)
                 .where(
-                    _PML.scan_date == _date.today(),
+                    _PML.scan_date == _today_kst(),
                     _PML.priority_boost == True,
                 )
             )
@@ -589,14 +543,14 @@ class AutoTradeEngine:
         if stoploss_sold_today:
             logger.info(f"[재매수방지] 손절/스마트청산 재매수제한 {len(stoploss_sold_today)}개: {stoploss_sold_today}")
 
-        # ── 3일 이내 손절 이력 — 냉각기간 재진입 차단 ─────────────────
+        # ── 3영업일 이내 손절 이력 — 냉각기간 재진입 차단 ─────────────
+        # 손절일 D → D+1 ~ D+3 거래일까지 차단 (주말·휴장일은 세지 않음)
         _COOLDOWN_DAYS = 3
-        from datetime import timedelta as _td
-        _cooldown_since = _today - _td(days=_COOLDOWN_DAYS)
+        _cooldown_since = business_days_ago(_today, _COOLDOWN_DAYS)
         _cooldown_r = await self.db.execute(
             select(AutoTradeLog.stock_code)
             .where(
-                AutoTradeLog.trade_date > _cooldown_since,
+                AutoTradeLog.trade_date >= _cooldown_since,
                 AutoTradeLog.trade_date < _today,   # 오늘은 stoploss_sold_today 로 처리
                 AutoTradeLog.action == "SELL",
                 AutoTradeLog.status != "CANCELLED",
@@ -606,7 +560,7 @@ class AutoTradeEngine:
         )
         stoploss_cooldown: set[str] = {r[0] for r in _cooldown_r.all()} - stoploss_sold_today
         if stoploss_cooldown:
-            logger.info(f"[재매수방지] 3일 쿨다운 적용 {len(stoploss_cooldown)}개: {stoploss_cooldown}")
+            logger.info(f"[재매수방지] 3영업일 쿨다운 적용 {len(stoploss_cooldown)}개: {stoploss_cooldown}")
 
         # ── 오늘 API 오류로 CANCELLED된 매수 종목 — 당일 재시도 차단 ──
         cancelled_buy_today: set[str] = set()
@@ -748,7 +702,7 @@ class AutoTradeEngine:
                 result_rows.append(row); continue
 
             if _code in stoploss_cooldown:
-                skip_msg = f"3일 손절 쿨다운 — 재매수 차단 (점수={score:.3f})"
+                skip_msg = f"3영업일 손절 쿨다운 — 재매수 차단 (점수={score:.3f})"
                 logger.info(f"  [{_code}] {name} → SKIP: {skip_msg}")
                 _clog.log("warn", "order", f"{name} → SKIP: {skip_msg}")
                 row["result"] = "SKIP"; row["skip_reason"] = skip_msg
@@ -908,6 +862,12 @@ class AutoTradeEngine:
                 composite_score = score,
                 atr           = r.get("atr"),
             )
+            if qty <= 0 and price > capped_budget:
+                skip_msg = f"예산 부족 — 1주 단가 {price:,}원 > 종목당 예산 {capped_budget:,.0f}원"
+                logger.info(f"  [{r['stock_code']}] {name} → SKIP: {skip_msg}")
+                _clog.log("warn", "order", f"{name} → SKIP: {skip_msg}")
+                row["result"] = "SKIP"; row["skip_reason"] = skip_msg
+                result_rows.append(row); continue
             if qty <= 0 or qty * price > available_cash:
                 skip_detail = f"{qty}주 × {price:,}원 = {qty*price:,}원 | 가용={available_cash:,.0f}원"
                 if trade_mode != "NORMAL":
@@ -1083,20 +1043,6 @@ class AutoTradeEngine:
             codes.add(s.stock_code)
             if s.stock_name:
                 name_map[s.stock_code] = s.stock_name
-
-        # 넥스트레이드(NXT) 영구 주문 불가 종목 제외 (오류코드 507615)
-        _nxt_r = await self.db.execute(
-            select(AutoTradeLog.stock_code).distinct()
-            .where(
-                AutoTradeLog.action == "BUY",
-                AutoTradeLog.status == "CANCELLED",
-                AutoTradeLog.error_msg.contains("507615"),
-            )
-        )
-        _nxt_blocked = {r[0] for r in _nxt_r.all()}
-        if _nxt_blocked:
-            codes -= _nxt_blocked
-            logger.info(f"[NXT필터] 넥스트레이드 불가 종목 {len(_nxt_blocked)}개 제외: {_nxt_blocked}")
 
         # 2) 워치리스트
         wl_r = await self.db.execute(
@@ -1403,6 +1349,30 @@ class AutoTradeEngine:
         # 거래량 급감 비율 (0.40→0.30: 기준 완화, 수익 +3% 미만 구간 추가 필터링)
         VOL_COLLAPSE_RATIO = 0.30
 
+        # ── 미체결(PENDING) 매도 — 20분 이내면 체결 대기, 그 이후면 취소 처리 후 재매도 ──
+        # 매도 PENDING 은 Holding 을 유지하므로(체결 확인 시 삭제) 중복 매도 주문을 여기서 막는다.
+        _PENDING_SELL_WAIT_SEC = 1200
+        _now_utc = datetime.now(timezone.utc)
+        sell_in_flight: set[str] = set()
+        _ps_r = await self.db.execute(
+            select(AutoTradeLog).where(
+                AutoTradeLog.action == "SELL",
+                AutoTradeLog.status == "PENDING",
+                AutoTradeLog.stock_code.in_(list(holdings.keys())),
+            )
+        )
+        for _ps in _ps_r.scalars().all():
+            _created = _ps.created_at
+            if _created is not None and _created.tzinfo is None:
+                _created = _created.replace(tzinfo=timezone.utc)
+            if _created is not None and (_now_utc - _created).total_seconds() < _PENDING_SELL_WAIT_SEC:
+                sell_in_flight.add(_ps.stock_code)
+            else:
+                _ps.status = "CANCELLED"
+                _ps.error_msg = (_ps.error_msg or "") + " [미체결 20분 경과 — 재매도 대상]"
+                logger.warning(f"  [{_ps.stock_code}] 매도 주문 20분+ 미체결 → CANCELLED 처리 후 재매도 허용")
+        await self.db.commit()
+
         for code, h in holdings.items():
             try:
                 # ── 수동 매수 종목 — 자동 청산 전면 제외 ──────────────────────
@@ -1420,6 +1390,10 @@ class AutoTradeEngine:
                     )
                     current = int(h["current_price"])
                 if current <= 0:
+                    continue
+
+                if code in sell_in_flight:
+                    logger.info(f"  [{code}] 매도 주문 체결 대기 중 — 청산 체크 스킵")
                     continue
 
                 avg = h["avg_buy_price"]
@@ -1470,16 +1444,15 @@ class AutoTradeEngine:
                 # ── 손절 (항상 적용) ─────────────────────────────
                 if change_pct <= -sl_pct:
                     reason = f"손절 {change_pct:.1f}% (기준 -{sl_pct}%)"
-                    AutoTradeEngine._peak_pct.pop(code, None)
                     await self._do_sell(code, h, current, reason, supply_score=supply_score)
                     continue
 
-                # ── 트레일링 스탑 (수익 구간 고점 추적) ─────────
-                # 고점 갱신
-                _prev_peak = AutoTradeEngine._peak_pct.get(code, change_pct)
-                if change_pct > _prev_peak:
-                    AutoTradeEngine._peak_pct[code] = change_pct
-                _cur_peak = AutoTradeEngine._peak_pct.get(code, change_pct)
+                # ── 트레일링 스탑 (수익 구간 고점 추적, DB 저장) ─
+                _cur_peak = h.get("peak_pnl_pct")
+                if _cur_peak is None or change_pct > _cur_peak:
+                    _cur_peak = change_pct
+                    h["peak_pnl_pct"] = _cur_peak
+                    await self._save_exit_state(code, peak_pnl_pct=round(_cur_peak, 4))
                 # 고점이 base_tp의 70% 이상이고 고점 대비 3% 이상 하락 시 청산
                 _TRAIL_TRIGGER = base_tp * 0.7   # e.g. 6%×0.7 = 4.2%
                 _TRAIL_DROP    = 3.0
@@ -1489,20 +1462,16 @@ class AutoTradeEngine:
                         f"(고점 {_cur_peak:+.1f}%에서 -{_TRAIL_DROP:.0f}% 하락)"
                     )
                     logger.info(f"  [{code}] {h.get('stock_name', code)} → {trail_reason}")
-                    AutoTradeEngine._peak_pct.pop(code, None)
                     await self._do_sell(code, h, current, trail_reason, supply_score=supply_score)
                     continue
 
                 # ── 스마트 홀딩 모드 (수급 ≥ 75점) ─────────────
                 if supply_score >= SMART_HOLD_SUPPLY:
                     # 연속 손실 -1.5% 이하 3사이클(30분) 지속 시 강제 청산
-                    if change_pct <= -1.5:
-                        AutoTradeEngine._smart_hold_loss_cycles[code] = (
-                            AutoTradeEngine._smart_hold_loss_cycles.get(code, 0) + 1
-                        )
-                    else:
-                        AutoTradeEngine._smart_hold_loss_cycles.pop(code, None)
-                    _loss_cycles = AutoTradeEngine._smart_hold_loss_cycles.get(code, 0)
+                    _loss_cycles = (int(h.get("smart_hold_loss_cycles") or 0) + 1) if change_pct <= -1.5 else 0
+                    if _loss_cycles != int(h.get("smart_hold_loss_cycles") or 0):
+                        h["smart_hold_loss_cycles"] = _loss_cycles
+                        await self._save_exit_state(code, smart_hold_loss_cycles=_loss_cycles)
 
                     if _loss_cycles >= 3:
                         _force_reason = (
@@ -1510,7 +1479,6 @@ class AutoTradeEngine:
                             f"({change_pct:+.1f}% × {_loss_cycles}사이클 지속)"
                         )
                         logger.warning(f"  [{code}] {_force_reason}")
-                        AutoTradeEngine._smart_hold_loss_cycles.pop(code, None)
                         await self._do_sell(code, h, current, _force_reason, supply_score=supply_score)
                         continue
 
@@ -1520,7 +1488,6 @@ class AutoTradeEngine:
                     )
                     if smart_reason:
                         logger.info(f"  [{code}] 스마트 청산 발동: {smart_reason}")
-                        AutoTradeEngine._smart_hold_loss_cycles.pop(code, None)
                         await self._do_sell(code, h, current, smart_reason, supply_score=supply_score)
                     else:
                         _loss_warn = f" | 손실 경고 {_loss_cycles}/3사이클" if _loss_cycles > 0 else ""
@@ -1548,6 +1515,13 @@ class AutoTradeEngine:
 
             except Exception as e:
                 logger.warning(f"  [{code}] 청산 체크 오류 (스킵): {e}")
+
+        await self.db.commit()
+
+    async def _save_exit_state(self, code: str, **values) -> None:
+        """트레일링 고점·스마트홀딩 손실 사이클을 holdings 에 저장 (재시작 후에도 유지)."""
+        from sqlalchemy import update as _update
+        await self.db.execute(_update(Holding).where(Holding.stock_code == code).values(**values))
 
     async def _smart_exit_signal(
         self,
@@ -1621,7 +1595,12 @@ class AutoTradeEngine:
         return None
 
     async def _do_sell(self, code: str, h: dict, current: int, reason: str, supply_score: float = 0.5):
-        """매도 주문 실행 + 텔레그램 알림 공통 처리."""
+        """매도 주문 실행 + 텔레그램 알림 공통 처리.
+        청산은 체결이 우선이므로 시장가로 주문한다 (급락 시 지정가 미체결 방지)."""
+        if not self._orders_allowed:
+            logger.info(f"  [{code}] 장 외 평가 전용 — 매도 신호만 기록: {reason}")
+            _clog.log("info", "exit", f"{h.get('stock_name', code)} 매도 신호 (평가전용, 주문 없음): {reason}")
+            return
         qty = h["quantity"]
         log = await self._execute_order(
             stock_code=code,
@@ -1634,6 +1613,7 @@ class AutoTradeEngine:
             market_score=self._calc_market_score(),
             composite_score=0,
             trigger_models=[reason],
+            use_market_order=True,
         )
         if log and log.status not in ("CANCELLED",):
             await tg.notify_sell(
@@ -1710,7 +1690,7 @@ class AutoTradeEngine:
             log.filled_at     = datetime.now(timezone.utc)
         else:
             try:
-                # StockMaster에서 상장 거래소 조회 (KOSPI→KRX, KOSDAQ→NXT)
+                # StockMaster 시장 구분 (주문은 코스피·코스닥 모두 KRX 로 전송)
                 from app.models.stock_master import StockMaster as _SM
                 _sm_r = await self.db.execute(
                     select(_SM.market).where(_SM.stock_code == stock_code)
@@ -1801,13 +1781,14 @@ class AutoTradeEngine:
         self.db.add(log)
         await self.db.flush()
 
-        # Holding 테이블 갱신
-        # BUY: FILLED/MOCK 확인된 경우만 추가 — PENDING(미체결 가능성)은 유령 보유 방지
-        # SELL: FILLED/MOCK/PENDING 모두 차감 (주문 접수 시 즉시 차감이 안전)
+        # Holding 테이블 갱신 — 체결 확인(FILLED/MOCK)된 경우만
+        # BUY PENDING: 유령 보유 방지 (잔고 동기화에서 체결 확인 시 생성)
+        # SELL PENDING: Holding 유지 → 미체결이면 다음 사이클에서 다시 손절 감시
+        #               (잔고 동기화에서 실잔고 소멸 확인 시 FILLED + 삭제)
         # CANCELLED: 갱신하지 않음
         if action == "BUY" and log.status in ("FILLED", "MOCK"):
             await self._update_holding(stock_code, stock_name, action, quantity, price, is_manual=is_manual, is_long_term=is_long_term)
-        elif action == "SELL" and log.status not in ("CANCELLED",):
+        elif action == "SELL" and log.status in ("FILLED", "MOCK"):
             await self._update_holding(stock_code, stock_name, action, quantity, price, is_manual=is_manual)
 
         # 주문 로그 + Holding을 즉시 커밋 — 이후 사이클 오류에 무관하게 이력 유실 방지
@@ -1970,6 +1951,14 @@ class AutoTradeEngine:
         return available_cash
 
     async def run_long_term_screening(self) -> None:
+        async with TRADE_CYCLE_LOCK:
+            self._orders_allowed = self.risk_mgr.is_market_open()
+            if not self._orders_allowed:
+                logger.info("[장기매수] 장 운영 시간 외 — 스킵")
+                return
+            await self._run_long_term_screening()
+
+    async def _run_long_term_screening(self) -> None:
         """
         가치주 스크리닝 후 장기보유 종목 자동 매수 (매일 1회 09:10 호출).
         - 이미 보유 중인 종목 제외

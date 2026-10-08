@@ -3,6 +3,7 @@ from typing import Optional
 import pytz
 
 from app.core.config import settings
+from app.core.market_calendar import is_trading_day
 
 
 SEOUL_TZ = pytz.timezone("Asia/Seoul")
@@ -17,7 +18,7 @@ class RiskManager:
 
     def is_market_open(self) -> bool:
         now = datetime.now(SEOUL_TZ)
-        if now.weekday() >= 5:
+        if not is_trading_day(now.date()):
             return False
         current = now.time()
         cutoff = time(MARKET_CLOSE.hour, MARKET_CLOSE.minute - PRE_CLOSE_BUFFER_MINUTES)
@@ -84,7 +85,7 @@ class RiskManager:
         """
         수급·AI점수 기반 스마트 포지션 사이징.
 
-        ① 기본 수량 = budget // price
+        ① 기본 수량 = budget // price  (1주도 예산 안에 못 사면 0 — 예산 초과 매수 금지)
         ② 수급 승수: supply 0.5→1.0×, 0.65→1.15×, 0.75→1.30×, 0.85→1.45×, 0.9+→1.5×
         ③ AI점수 승수: score 0.6→1.0×, 0.75→1.15×, 0.85→1.25×, 0.9+→1.3×
         ④ ATR 상한: 허용손실(budget×5%) / ATR×2 — 1주 미만이면 최소 base_qty//2 보장
@@ -95,7 +96,7 @@ class RiskManager:
 
         base_qty = int(budget // price)
         if base_qty < 1:
-            return 1
+            return 0
 
         # ── 수급 승수 (0.5 기준, 최대 +50%) ─────────────────
         supply_boost = max(0.0, min(0.5, (supply_score - 0.5) * 1.0))
@@ -120,4 +121,4 @@ class RiskManager:
         # ── 최대 budget × 1.5 이내 ───────────────────────────
         budget_cap = int(budget * max_budget_mult // price)
 
-        return max(1, min(smart_qty, effective_max, budget_cap))
+        return max(0, min(smart_qty, effective_max, budget_cap))
